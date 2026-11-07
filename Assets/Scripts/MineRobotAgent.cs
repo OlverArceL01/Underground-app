@@ -14,24 +14,19 @@ public class MineRobotAgent : Agent
     [Header("Navigation")]
     public Transform target;
 
-    public float maxDistance = 100f;
-    private float smoothedDistance;
+    public float maxDistance = 300f;
+    public float maxSpeed = 40f;
+    public float maxAngularSpeed = 10f;
+
+    private float previousDistance;
     private bool distanceInitialized = false;
-    private const float Alpha = 0.3f;
-
-
-    private Vector2 previousPosition;
-    private float stationaryTimer = 0f;
-
-    private const float MinDisplacement = 1f;
-    private const float StationaryTime = 5f;    
-
+    
     private GameObject targetMarker;
     private LineRenderer targetBeam;
     private LineRenderer[] targetRings;
 
     private const float MarkerHeight = 7f;
-    private const float MarkerRadius = 3f;
+    private const float MarkerRadius = 1.5f;
 
     public override void Initialize()
     {
@@ -39,7 +34,6 @@ public class MineRobotAgent : Agent
             carController = GetComponent<car>();
         initialPosition = transform.position;
         initialRotation = transform.rotation;
-
         if (target != null)
             CreateTargetMarker();
 
@@ -51,43 +45,37 @@ public class MineRobotAgent : Agent
         carController.ResetVelocity();
         transform.SetPositionAndRotation(initialPosition, initialRotation);
 
-
         distanceInitialized = false;
-        smoothedDistance = 0f;
-
-        previousPosition = new Vector2(
-            transform.position.x,
-            transform.position.z
-        );
-
-        stationaryTimer = 0f;
+        previousDistance = 0f;
     }
 
     public override void CollectObservations(VectorSensor sensor)
     {
-        // target direction
+        // Target Direction (XZ only)
         Vector3 direction = target.position - transform.position;
+        direction.y = 0f;
         Vector3 localDirection = transform.InverseTransformDirection(direction.normalized);
-        sensor.AddObservation(localDirection);
-        
-        // target distance
-        float distance = Vector3.Distance(
-            transform.position,
-            target.position
+        sensor.AddObservation(localDirection.x);
+        sensor.AddObservation(localDirection.z);
+
+        // Target Distance (XZ only)
+        float distance = Vector2.Distance(
+            new Vector2(transform.position.x, transform.position.z),
+            new Vector2(target.position.x, target.position.z)
         );
         sensor.AddObservation(Mathf.Clamp01(distance / maxDistance));
 
-        // local orientation
+        // Local Orientation
         sensor.AddObservation(transform.up.x);
         sensor.AddObservation(transform.up.z);
 
-        // local velocity
+        // Local Velocity
         Vector3 velocity = transform.InverseTransformDirection(carController.Velocity);
-        sensor.AddObservation(velocity);
+        sensor.AddObservation(velocity / maxSpeed);
 
-        // angular velocity
+        // Angular Velocity
         Vector3 angularVelocity = transform.InverseTransformDirection(carController.AngularVelocity);
-        sensor.AddObservation(angularVelocity);
+        sensor.AddObservation(angularVelocity / maxAngularSpeed);
 
         // raycasts
         CollectRaycasts(sensor);
@@ -129,28 +117,32 @@ public class MineRobotAgent : Agent
 
     public override void OnActionReceived(ActionBuffers actions)
     {
+        AddReward(-0.001f);
+
         float steering = actions.ContinuousActions[0];
         float throttle = actions.ContinuousActions[1];
 
-        float speed = carController.Velocity.magnitude;
-
-
         Debug.Log(
-            $"[ACTION] Steering: {steering:F4} | " +
-            $"Throttle: {throttle:F4} | " +
-            $"Velocity: {carController.Velocity.magnitude:F4}"
+            $"[ACTION] " +
+            $"Steering: {steering:F3} | " +
+            $"Throttle: {throttle:F3} | " +
+            $"Velocity: {carController.Velocity} | " +
+            $"AngularVelocity: {carController.AngularVelocity}"
         );
 
         carController.SetAgentInput(steering, throttle);
 
-        if (speed > 2f)
-            AddReward(-(speed - 2f) * 0.01f);
+        float speed = carController.Velocity.magnitude;
+        float angularVelocity = carController.AngularVelocity.magnitude;
+        if (speed > 4f)
+            AddReward(-(speed - 4f) * 0.1f);
+        if (angularVelocity > 1f)
+            AddReward(-(angularVelocity - 1f) * 0.1f);
 
-        if (CheckStationary())
-            return;
         CalculateProgressReward();
         CheckTarget();
         CheckFall();
+    
     }
 
     private void CalculateProgressReward()
@@ -169,40 +161,26 @@ public class MineRobotAgent : Agent
 
         if (!distanceInitialized)
         {
-            smoothedDistance = currentDistance;
+            previousDistance = currentDistance;
             distanceInitialized = true;
             return;
         }
 
-        float previousSmoothedDistance = smoothedDistance;
-
-        smoothedDistance =
-            Alpha * currentDistance +
-            (1f - Alpha) * smoothedDistance;
-
-        float progress = previousSmoothedDistance - smoothedDistance;
-
-        float reward = progress * 1000f;
-
-        AddReward(reward);
-
-        Debug.Log(
-            $"[EMA] Current: {currentDistance:F5} | " +
-            $"Smoothed: {smoothedDistance:F5} | " +
-            $"Progress: {progress:F6} | " +
-            $"Reward: {reward:F5}"
-        );
+        float progress = previousDistance - currentDistance;
+        AddReward(progress);
+        previousDistance = currentDistance;
     }
 
     private void CheckTarget()
     {
-        float distance = Vector3.Distance(
-            transform.position,
-            target.position
+        float distance = Vector2.Distance(
+            new Vector2(transform.position.x, transform.position.z),
+            new Vector2(target.position.x, target.position.z)
         );
+
         if (distance < 3f)
         {
-            AddReward(5f);
+            AddReward(100f);
             EndEpisode();
         }
     }
@@ -210,7 +188,6 @@ public class MineRobotAgent : Agent
     private void CheckFall()
     {
         Vector3 origin = transform.position + Vector3.up * 0.5f;
-
         bool groundDetected = Physics.Raycast(
             origin,
             Vector3.down,
@@ -219,56 +196,18 @@ public class MineRobotAgent : Agent
             LayerMask.GetMask("Mine"),
             QueryTriggerInteraction.Ignore
         );
-
         if (!groundDetected)
         {
-            AddReward(-5f);
+            AddReward(-100f);
             EndEpisode();
         }
-    }
-
-    private bool CheckStationary()
-    {
-        Vector2 currentPosition = new Vector2(
-            transform.position.x,
-            transform.position.z
-        );
-
-        float displacement = Vector2.Distance(
-            currentPosition,
-            previousPosition
-        );
-
-        if (displacement >= MinDisplacement)
-        {
-            stationaryTimer = 0f;
-            previousPosition = currentPosition;
-            return false;
-        }
-
-        stationaryTimer += Time.fixedDeltaTime;
-
-        if (stationaryTimer >= StationaryTime)
-        {
-            AddReward(-2f);
-
-            Debug.Log(
-                $"[STATIONARY] Displacement: {displacement:F4}m | " +
-                $"Time: {stationaryTimer:F2}s | Ending episode"
-            );
-
-            EndEpisode();
-            return true;
-        }
-
-        return false;
     }
 
     private void OnCollisionEnter(Collision collision)
     {
         if (collision.gameObject.layer == LayerMask.NameToLayer("Obstacle"))
         {
-            AddReward(-5f);
+            AddReward(-100f);
             EndEpisode();
         }
     }
