@@ -2,6 +2,7 @@ using System;
 using UnityEngine;
 using UnityEngine.InputSystem;
 
+
 [Serializable]
 public class WheelProperties
 {
@@ -23,7 +24,7 @@ public class WheelProperties
     [HideInInspector] public Vector3 localVelocity;
 }
 
-public class car : MonoBehaviour
+public class Robot : MonoBehaviour
 {
     [Header("Wheel Setup")]
     public GameObject wheelPrefab;
@@ -39,7 +40,7 @@ public class car : MonoBehaviour
     public float dampAmount = 2.5f;           // damping constant
     public float suspensionForceClamp = 200f; // cap on total suspension force
 
-    [Header("Car Mass")]
+    [Header("Robot Mass")]
     public float massInKg = 100f; // (not strictly used, but you might incorporate it)
 
     // These are updated each frame
@@ -47,20 +48,23 @@ public class car : MonoBehaviour
     [HideInInspector] public bool Forwards = false;
 
     private Rigidbody rb;
-    public Vector3 Velocity => rb.linearVelocity;
-    public Vector3 AngularVelocity => rb.angularVelocity;
+
+    [Header("Control")]
+    public bool usePlayerInput = true;
 
     [Header("Differential Steering")]
     public float turnSpeed = 1.5f;
     public float minTurnSpeed = 0.25f;
 
-    [Header("Control")]
-    public bool usePlayerInput = true;
 
-    [Header("Raycast Sensors")]
-    public float rayDistance = 40f;
+    public Vector3 Velocity => rb.linearVelocity;
+    public Vector3 AngularVelocity => rb.angularVelocity;
+
+    [Header("Sensors")]
     public Transform[] sensors;
-    
+    public Transform[] Sensors => sensors;
+    public float rayDistance = 40f;
+
     void Start()
     {
         // Grab or add a Rigidbody
@@ -69,8 +73,6 @@ public class car : MonoBehaviour
 
         // Slight tweak to inertia if desired
         rb.inertiaTensor = 1.0f * rb.inertiaTensor;
- 
-        rb.centerOfMass = new Vector3(0f, -0.25f, 0f);
 
         // Create each wheel
         if (wheels != null)
@@ -95,6 +97,24 @@ public class car : MonoBehaviour
                 w.parentRigidbody = rb;
             }
         }
+
+        // Get raycast origin points
+        Transform raycastsParent = transform.Find("raycasts");
+
+        if (raycastsParent != null)
+        {
+            sensors = new Transform[raycastsParent.childCount];
+
+            for (int i = 0; i < raycastsParent.childCount; i++)
+            {
+                sensors[i] = raycastsParent.GetChild(i);
+            }
+        }
+        else
+        {
+            sensors = new Transform[0];
+        }
+
     }
 
     void Update()
@@ -110,6 +130,15 @@ public class car : MonoBehaviour
     {
         if (wheels == null || wheels.Length == 0) return;
 
+        float steering = Mathf.Clamp(input.x, -1f, 1f);
+        float throttle = Mathf.Clamp(input.y, -1f, 1f);
+
+        // Differential steering
+        float turn = -steering * turnSpeed;
+
+        float leftTorque = throttle - turn;
+        float rightTorque = throttle + turn;
+
         foreach (var wheel in wheels)
         {
             if (!wheel.wheelObject) continue;
@@ -117,36 +146,67 @@ public class car : MonoBehaviour
             Transform wheelObj = wheel.wheelObject.transform;
             Transform wheelVisual = wheelObj.GetChild(0);
 
-            // DIFFERENTIAL STEERING
-            float steering = Mathf.Clamp(input.x, -1f, 1f);
-            float throttle = Mathf.Clamp(input.y, -1f, 1f);
+            // Determine wheel side using local X position
+            float sideTorque = wheel.localPosition.x < 0f
+                ? leftTorque
+                : rightTorque;
 
-            // X < 0 = left, X > 0 = right
-            float side = Mathf.Sign(wheel.localPosition.x);
+            // Keep wheels facing forward
+            if (wheel.wheelState == 1)
+            {
+                Quaternion targetRot = Quaternion.identity;
 
-            // Opposite speed adjustment on each side
-            float differential = -steering * side * turnSpeed;
-            
-            float wheelSpeed = throttle + differential;
-            wheelSpeed = Mathf.Clamp(wheelSpeed, -1f, 1f);
+                wheelObj.localRotation = Quaternion.Lerp(
+                    wheelObj.localRotation,
+                    targetRot,
+                    Time.fixedDeltaTime * 100f
+                );
+            }
+            else if (wheel.wheelState == 0 &&
+                    rb.linearVelocity.magnitude > 0.04f)
+            {
+                RaycastHit tmpHit;
 
-            wheel.torque = wheelSpeed * maxTorque / massInKg;
+                if (Physics.Raycast(
+                    transform.TransformPoint(wheel.localPosition),
+                    -transform.up,
+                    out tmpHit,
+                    wheelSize * 2f))
+                {
+                    Quaternion aim = Quaternion.LookRotation(
+                        rb.GetPointVelocity(tmpHit.point),
+                        transform.up
+                    );
 
-            // Determine world position and velocity
-            wheel.wheelWorldPosition = transform.TransformPoint(wheel.localPosition);
+                    wheelObj.rotation = Quaternion.Lerp(
+                        wheelObj.rotation,
+                        aim,
+                        Time.fixedDeltaTime * 100f
+                    );
+                }
+            }
+
+            wheel.wheelWorldPosition =
+                transform.TransformPoint(wheel.localPosition);
 
             Vector3 velocityAtWheel =
                 rb.GetPointVelocity(wheel.wheelWorldPosition);
 
-            // Local velocity
             wheel.localVelocity =
                 wheelObj.InverseTransformDirection(velocityAtWheel);
 
-            // ROLLING FRICTION
+            // Differential torque
+            wheel.torque = Mathf.Clamp(
+                sideTorque,
+                -1f,
+                1f
+            ) * maxTorque / massInKg;
+
+            // Rolling friction
             float rollingFrictionForce =
                 -frictionCoWheel * wheel.localVelocity.z;
 
-            // LATERAL FRICTION
+            // Lateral friction
             float lateralFriction =
                 -wheelGrip * wheel.localVelocity.x;
 
@@ -156,7 +216,7 @@ public class car : MonoBehaviour
                 maxGrip
             );
 
-            // ENGINE FORCE
+            // Engine force
             float engineForce = wheel.torque / wheelSize;
 
             Vector3 totalLocalForce = new Vector3(
@@ -174,7 +234,7 @@ public class car : MonoBehaviour
 
             Forwards = wheel.localVelocity.z > 0f;
 
-            // SUSPENSION
+            // Suspension
             RaycastHit hit;
 
             if (Physics.Raycast(
@@ -184,11 +244,11 @@ public class car : MonoBehaviour
                 wheelSize * 2f))
             {
                 float rayLen = wheelSize * 2f;
-
                 float compression = rayLen - hit.distance;
 
                 float damping =
-                    (wheel.lastSuspensionLength - hit.distance) * dampAmount;
+                    (wheel.lastSuspensionLength - hit.distance)
+                    * dampAmount;
 
                 float springForce =
                     (compression + damping) * suspensionForce;
@@ -208,8 +268,8 @@ public class car : MonoBehaviour
                     hit.point
                 );
 
-                // Keep wheel visible and positioned at suspension contact
-                wheelObj.position = hit.point + transform.up * wheelSize;
+                wheelObj.position =
+                    hit.point + transform.up * wheelSize;
 
                 wheel.lastSuspensionLength = hit.distance;
             }
@@ -219,7 +279,7 @@ public class car : MonoBehaviour
                     wheel.wheelWorldPosition - transform.up * wheelSize;
             }
 
-            // VISUAL WHEEL ROTATION
+            // Visual wheel rotation
             Vector3 forwardInWheelSpace =
                 wheelObj.InverseTransformDirection(
                     rb.GetPointVelocity(wheel.wheelWorldPosition)
@@ -234,20 +294,6 @@ public class car : MonoBehaviour
                 Space.Self
             );
         }
-    }
-
-    public void ResetVelocity()
-    {
-        rb.linearVelocity = Vector3.zero;
-        rb.angularVelocity = Vector3.zero;
-    }
-
-    public void SetAgentInput(float steering, float throttle)
-    {
-        input = new Vector2(
-            Mathf.Clamp(steering, -1f, 1f),
-            Mathf.Clamp(throttle, -1f, 1f)
-        );
     }
 
     void OnDrawGizmos()
@@ -281,22 +327,45 @@ public class car : MonoBehaviour
             }
         }
 
-        foreach (Transform ray in sensors)
-        {
-            bool hit = Physics.Raycast(
-                ray.position,
-                ray.forward,
-                out RaycastHit hitInfo,
-                rayDistance
-            );
+        if (sensors == null) return;
 
-            Debug.DrawRay(
-                ray.position,
-                ray.forward * (hit ? hitInfo.distance : rayDistance),
-                hit ? Color.red : Color.green
-            );
+        foreach (Transform sensor in sensors)
+        {
+            if (sensor == null) continue;
+
+            Vector3 origin = sensor.position;
+            Vector3 direction = sensor.forward;
+
+            if (Physics.Raycast(origin, direction, out RaycastHit hit, rayDistance))
+            {
+                Gizmos.color = Color.red;
+                Gizmos.DrawLine(origin, hit.point);
+                Gizmos.DrawSphere(hit.point, 0.08f);
+            }
+            else
+            {
+                Gizmos.color = Color.green;
+                Gizmos.DrawLine(origin, origin + direction * rayDistance);
+            }
         }
 
+    }
+
+    public void SetAgentInput(float steering, float throttle)
+    {
+        input = new Vector2(
+            Mathf.Clamp(steering, -1f, 1f),
+            Mathf.Clamp(throttle, -1f, 1f)
+        );
+    }
+
+    public void Reset()
+    {
+        rb.position = transform.position;
+        rb.rotation = transform.rotation;
+
+        rb.linearVelocity = Vector3.zero;
+        rb.angularVelocity = Vector3.zero;
     }
 
 }

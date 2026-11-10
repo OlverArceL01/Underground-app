@@ -4,19 +4,30 @@ using Unity.MLAgents;
 using Unity.MLAgents.Actuators;
 using Unity.MLAgents.Sensors;
 
-public class MineRobotAgent : Agent
+[System.Serializable]
+public struct NavigationRoute
+{
+    public Vector3 origin;
+    public Vector3 target;
+
+    public NavigationRoute(Vector3 origin, Vector3 target)
+    {
+        this.origin = origin;
+        this.target = target;
+    }
+}
+
+
+public class RobotAgent : Agent
 {
     [Header("References")]
-    public car carController;
-    private Vector3 initialPosition;
-    private Quaternion initialRotation;
+    public Robot robotController;
 
-    [Header("Navigation")]
-    public Transform target;
+    private Transform target;
 
-    public float maxDistance = 300f;
-    public float maxSpeed = 40f;
-    public float maxAngularSpeed = 10f;
+    public float maxDistance = 450f;
+    public float maxSpeed = 10f;
+    public float maxAngularSpeed = 5f;
 
     private float previousDistance;
     private bool distanceInitialized = false;
@@ -28,137 +39,158 @@ public class MineRobotAgent : Agent
     private const float MarkerHeight = 7f;
     private const float MarkerRadius = 1.5f;
 
+    private NavigationRoute[] routes =
+    {
+        new NavigationRoute(
+            new Vector3(383.252f, -16.52249f, 95.17547f),
+            new Vector3(296.3f, -17.2f, 109.7f)
+        ),
+        new NavigationRoute(
+            new Vector3(309.0458f, -16.11479f, 111.3884f),
+            new Vector3(298.18f, 0.77f, 208.2f)
+        ),
+        new NavigationRoute(
+            new Vector3(-5.62859f, -17.34035f, 53.44241f),
+            new Vector3(230.3f, -16.92f, 90.4f)
+        ),
+        new NavigationRoute(
+            new Vector3(-10.5f, -13.18f, 44.9f),
+            new Vector3(-62.9f, -16.27f, 96.05f)
+        ),
+        new NavigationRoute(
+            new Vector3(-5.75188f, -16.39041f, 81.8746f),
+            new Vector3(134.8f, -59.8f, -195.5f)
+        ),
+        new NavigationRoute(
+            new Vector3(-747.5172f, -1.36874f, 99.11747f),
+            new Vector3(-549.6f, -9.6f, 34.6f)
+        ),
+        new NavigationRoute(
+            new Vector3(-1321.629f, 11.7f, 420.8f),
+            new Vector3(-1212f, 9.6f, 101f)
+        ),
+        new NavigationRoute(
+            new Vector3(-1179.97f, 62.08345f, 739.4885f),
+            new Vector3(-1109.2f, 96.09f, 322.1f)
+        ),
+        new NavigationRoute(
+            new Vector3(-1047.788f, 78.40872f, 648.2389f),
+            new Vector3(-1325.14f, 8.91f, 452.4f)
+        ),
+        new NavigationRoute(
+            new Vector3(-1334.863f, 11.39713f, 78.94662f),
+            new Vector3(-1494.2f, 19.5f, -219.8f)
+        )
+    };
+
+    [Header("Stuck Detection")]
+    public float stuckTime = 3f;
+    public float minMovement = 0.1f;
+
+    private Vector3 lastPosition;
+    private float stuckTimer;
+
     public override void Initialize()
     {
-        if (carController == null)
-            carController = GetComponent<car>();
-        initialPosition = transform.position;
-        initialRotation = transform.rotation;
-        if (target != null)
-            CreateTargetMarker();
+        if (robotController == null)
+            robotController = GetComponent<Robot>();
 
+        if (robotController == null || routes == null || routes.Length == 0)
+        {
+            Debug.LogError("Robot o rutas no asignadas.");
+            enabled = false;
+            return;
+        }
+
+        GameObject targetObject = new GameObject("RobotTarget");
+        target = targetObject.transform;
+
+        target.position = routes[0].target;
+
+        CreateTargetMarker();
     }
 
     public override void OnEpisodeBegin()
     {
-        carController.SetAgentInput(0f, 0f);
-        carController.ResetVelocity();
-        transform.SetPositionAndRotation(initialPosition, initialRotation);
+        NavigationRoute route = routes[Random.Range(0, routes.Length)];
 
-        distanceInitialized = false;
-        previousDistance = 0f;
+        robotController.SetAgentInput(0f, 0f);
+
+        transform.SetPositionAndRotation(
+            route.origin,
+            Quaternion.Euler(0f, 0f, 0f)
+        );
+        robotController.Reset();
+
+        target.position = route.target;
+
+        previousDistance = GetDistanceXZ(transform.position, target.position);
+        distanceInitialized = true;
+        
+        lastPosition = robotController.transform.position;
+        stuckTimer = 0f;
     }
 
     public override void CollectObservations(VectorSensor sensor)
     {
-        // Target Direction (XZ only)
+        // Target Direction
         Vector3 direction = target.position - transform.position;
         direction.y = 0f;
         Vector3 localDirection = transform.InverseTransformDirection(direction.normalized);
-        sensor.AddObservation(localDirection.x);
-        sensor.AddObservation(localDirection.z);
+        sensor.AddObservation(localDirection);
 
-        // Target Distance (XZ only)
-        float distance = Vector2.Distance(
-            new Vector2(transform.position.x, transform.position.z),
-            new Vector2(target.position.x, target.position.z)
-        );
+        // Target Distance
+        float distance = GetDistanceXZ(transform.position, target.position);
+        
         sensor.AddObservation(Mathf.Clamp01(distance / maxDistance));
 
         // Local Orientation
-        sensor.AddObservation(transform.up.x);
-        sensor.AddObservation(transform.up.z);
+        sensor.AddObservation(transform.up);
 
         // Local Velocity
-        Vector3 velocity = transform.InverseTransformDirection(carController.Velocity);
+        Vector3 velocity = transform.InverseTransformDirection(robotController.Velocity);
         sensor.AddObservation(velocity / maxSpeed);
 
         // Angular Velocity
-        Vector3 angularVelocity = transform.InverseTransformDirection(carController.AngularVelocity);
+        Vector3 angularVelocity = transform.InverseTransformDirection(robotController.AngularVelocity);
         sensor.AddObservation(angularVelocity / maxAngularSpeed);
 
         // raycasts
-        CollectRaycasts(sensor);
-    }
-
-    private void CollectRaycasts(VectorSensor sensor)
-    {
-        foreach (Transform ray in carController.sensors)
+        foreach (Transform ray in robotController.Sensors)
         {
             bool hit = Physics.Raycast(
                 ray.position,
                 ray.forward,
                 out RaycastHit hitInfo,
-                carController.rayDistance,
+                robotController.rayDistance,
                 Physics.DefaultRaycastLayers,
                 QueryTriggerInteraction.Ignore
             );
 
-            float distance = hit
-                ? hitInfo.distance / carController.rayDistance
+            float hitDistance = hit
+                ? hitInfo.distance / robotController.rayDistance
                 : 1f;
 
-            bool isObstacle = false;
-            bool isMine = false;
-
-            if (hit)
-            {
-                int layer = hitInfo.collider.gameObject.layer;
-                string layerName = LayerMask.LayerToName(layer);
-
-                isObstacle = layer == LayerMask.NameToLayer("Obstacle");
-                isMine = layer == LayerMask.NameToLayer("Mine");                
-            }
-            sensor.AddObservation(distance);
-            sensor.AddObservation(isObstacle);
-            sensor.AddObservation(isMine);
+            sensor.AddObservation(hitDistance);
         }
     }
 
+
     public override void OnActionReceived(ActionBuffers actions)
     {
-        AddReward(-0.001f);
-
         float steering = actions.ContinuousActions[0];
         float throttle = actions.ContinuousActions[1];
-
-        Debug.Log(
-            $"[ACTION] " +
-            $"Steering: {steering:F3} | " +
-            $"Throttle: {throttle:F3} | " +
-            $"Velocity: {carController.Velocity} | " +
-            $"AngularVelocity: {carController.AngularVelocity}"
-        );
-
-        carController.SetAgentInput(steering, throttle);
-
-        float speed = carController.Velocity.magnitude;
-        float angularVelocity = carController.AngularVelocity.magnitude;
-        if (speed > 4f)
-            AddReward(-(speed - 4f) * 0.1f);
-        if (angularVelocity > 1f)
-            AddReward(-(angularVelocity - 1f) * 0.1f);
+        robotController.SetAgentInput(steering, throttle);
 
         CalculateProgressReward();
         CheckTarget();
         CheckFall();
-    
+        CheckStuck();
     }
 
     private void CalculateProgressReward()
     {
-        Vector2 currentPos = new Vector2(
-            transform.position.x,
-            transform.position.z
-        );
-
-        Vector2 targetPos = new Vector2(
-            target.position.x,
-            target.position.z
-        );
-
-        float currentDistance = Vector2.Distance(currentPos, targetPos);
-
+        float currentDistance = GetDistanceXZ(transform.position, target.position);
         if (!distanceInitialized)
         {
             previousDistance = currentDistance;
@@ -167,20 +199,21 @@ public class MineRobotAgent : Agent
         }
 
         float progress = previousDistance - currentDistance;
-        AddReward(progress);
+
+        AddReward(Mathf.Max(progress, -0.0001f));
         previousDistance = currentDistance;
     }
 
     private void CheckTarget()
     {
-        float distance = Vector2.Distance(
-            new Vector2(transform.position.x, transform.position.z),
-            new Vector2(target.position.x, target.position.z)
+        float distance = Vector3.Distance(
+            transform.position,
+            target.position
         );
 
         if (distance < 3f)
         {
-            AddReward(100f);
+            AddReward(20f);
             EndEpisode();
         }
     }
@@ -198,8 +231,34 @@ public class MineRobotAgent : Agent
         );
         if (!groundDetected)
         {
-            AddReward(-100f);
+            AddReward(-20f);
             EndEpisode();
+        }
+    }
+
+    private void CheckStuck()
+    {
+        Vector3 currentPosition = robotController.transform.position;
+
+        float movement = Vector3.Distance(
+            currentPosition,
+            lastPosition
+        );
+
+        if (movement >= minMovement)
+        {
+            lastPosition = currentPosition;
+            stuckTimer = 0f;
+        }
+        else
+        {
+            stuckTimer += Time.fixedDeltaTime;
+
+            if (stuckTimer >= stuckTime)
+            {
+                AddReward(-0.0001f);
+                EndEpisode();
+            }
         }
     }
 
@@ -207,7 +266,7 @@ public class MineRobotAgent : Agent
     {
         if (collision.gameObject.layer == LayerMask.NameToLayer("Obstacle"))
         {
-            AddReward(-100f);
+            AddReward(-20f);
             EndEpisode();
         }
     }
@@ -222,6 +281,14 @@ public class MineRobotAgent : Agent
     }
 
 
+    private float GetDistanceXZ(Vector3 a, Vector3 b)
+    {
+        a.y = 0f;
+        b.y = 0f;
+
+        return Vector3.Distance(a, b);
+    }
+
     private void Update()
     {
         if (target == null || targetMarker == null)
@@ -231,12 +298,10 @@ public class MineRobotAgent : Agent
 
         float time = Time.time;
 
-        // Haz vertical
         targetBeam.positionCount = 2;
         targetBeam.SetPosition(0, Vector3.up * 0.2f);
         targetBeam.SetPosition(1, Vector3.up * MarkerHeight);
 
-        // Anillos animados
         for (int i = 0; i < targetRings.Length; i++)
         {
             float height = 0.2f + i * 0.12f;
@@ -245,7 +310,6 @@ public class MineRobotAgent : Agent
             DrawRing(targetRings[i], radius, height);
         }
 
-        // Diamante flotante
         Transform diamond = targetMarker.transform.Find("TargetDiamond");
 
         if (diamond != null)
@@ -294,7 +358,6 @@ public class MineRobotAgent : Agent
             );
         }
 
-        // Diamante flotante
         GameObject diamond = GameObject.CreatePrimitive(PrimitiveType.Cube);
         diamond.name = "TargetDiamond";
         diamond.transform.SetParent(targetMarker.transform);

@@ -141,7 +141,7 @@ Transform:
   m_GameObject: {fileID: 5355010901233390585}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 415.7, y: -12.27, z: 97.26}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -311,3 +311,9 @@ MonoBehaviour:
   massInKg: 400
   input: {x: 0, y: 0}
   Forwards: 0
+  turnSpeed: 1.5
+  minTurnSpeed: 0.25
+  usePlayerInput: 1
+  rayDistance: 40
+  sensorColumns: 5
+  sensorRows: 5
