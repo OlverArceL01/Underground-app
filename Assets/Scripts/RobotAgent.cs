@@ -3,6 +3,8 @@ using UnityEngine;
 using Unity.MLAgents;
 using Unity.MLAgents.Actuators;
 using Unity.MLAgents.Sensors;
+using System.Linq;
+using System.Collections.Generic;
 
 [System.Serializable]
 public struct NavigationRoute
@@ -83,12 +85,22 @@ public class RobotAgent : Agent
         )
     };
 
-    [Header("Stuck Detection")]
-    public float stuckTime = 3f;
-    public float minMovement = 0.1f;
 
+    [SerializeField] private int stuckStepsLimit = 150;
+    [SerializeField] private float minMovement = 0.1f;
+
+    private int stuckSteps;
     private Vector3 lastPosition;
-    private float stuckTimer;
+
+    private int episodeSteps;
+    [SerializeField] private int maxEpisodeSteps = 5000;
+
+    [Header("Sensors")]
+    public Lidar3D[] lidars;
+
+    private List<NavigationRoute> routeBag = new List<NavigationRoute>();
+    private int routeIndex = 0;
+    private NavigationRoute lastRoute;
 
     public override void Initialize()
     {
@@ -112,7 +124,8 @@ public class RobotAgent : Agent
 
     public override void OnEpisodeBegin()
     {
-        NavigationRoute route = routes[Random.Range(0, routes.Length)];
+        episodeSteps = 0;
+        NavigationRoute route = GetRandomRoute();
 
         robotController.SetAgentInput(0f, 0f);
 
@@ -128,7 +141,7 @@ public class RobotAgent : Agent
         distanceInitialized = true;
         
         lastPosition = robotController.transform.position;
-        stuckTimer = 0f;
+        stuckSteps = 0;
     }
 
     public override void CollectObservations(VectorSensor sensor)
@@ -155,29 +168,22 @@ public class RobotAgent : Agent
         Vector3 angularVelocity = transform.InverseTransformDirection(robotController.AngularVelocity);
         sensor.AddObservation(angularVelocity / maxAngularSpeed);
 
-        // raycasts
-        foreach (Transform ray in robotController.Sensors)
+        // lidars 3D
+        foreach(Lidar3D lidar in lidars)
         {
-            bool hit = Physics.Raycast(
-                ray.position,
-                ray.forward,
-                out RaycastHit hitInfo,
-                robotController.rayDistance,
-                Physics.DefaultRaycastLayers,
-                QueryTriggerInteraction.Ignore
-            );
-
-            float hitDistance = hit
-                ? hitInfo.distance / robotController.rayDistance
-                : 1f;
-
-            sensor.AddObservation(hitDistance);
+            lidar.Scan();
+            foreach (float distances in lidar.GetObservations())
+            {
+                sensor.AddObservation(distances);
+            }
         }
     }
 
 
     public override void OnActionReceived(ActionBuffers actions)
     {
+        episodeSteps++;
+
         float steering = actions.ContinuousActions[0];
         float throttle = actions.ContinuousActions[1];
         robotController.SetAgentInput(steering, throttle);
@@ -186,11 +192,18 @@ public class RobotAgent : Agent
         CheckTarget();
         CheckFall();
         CheckStuck();
+        CheckTime();
     }
 
     private void CalculateProgressReward()
     {
+        float upright = Vector3.Dot(
+            transform.up,
+            Vector3.up
+        );
+
         float currentDistance = GetDistanceXZ(transform.position, target.position);
+
         if (!distanceInitialized)
         {
             previousDistance = currentDistance;
@@ -200,20 +213,35 @@ public class RobotAgent : Agent
 
         float progress = previousDistance - currentDistance;
 
-        AddReward(Mathf.Max(progress, -0.0001f));
+        if (upright < 0.5f)
+        {
+            float penalty = Mathf.Lerp(0.01f, 0.03f,
+                Mathf.InverseLerp(0.5f, -1f, upright));
+
+            AddReward(-penalty);
+        }
+        else
+        {
+             AddReward(Mathf.Clamp(progress, -0.01f, 0.1f));
+            float tiltPenalty = Mathf.InverseLerp(0.71f, 0.5f, upright);
+            AddReward(-0.003f * tiltPenalty);
+        }
+
         previousDistance = currentDistance;
     }
 
     private void CheckTarget()
     {
-        float distance = Vector3.Distance(
-            transform.position,
-            target.position
+        float upright = Vector3.Dot(
+            transform.up,
+            Vector3.up
         );
 
-        if (distance < 3f)
+        float distance = GetDistanceXZ(transform.position, target.position);
+
+        if (distance < 3f && upright > 0.5f)
         {
-            AddReward(20f);
+            AddReward(5f);
             EndEpisode();
         }
     }
@@ -231,7 +259,7 @@ public class RobotAgent : Agent
         );
         if (!groundDetected)
         {
-            AddReward(-20f);
+            AddReward(-5f);
             EndEpisode();
         }
     }
@@ -240,25 +268,31 @@ public class RobotAgent : Agent
     {
         Vector3 currentPosition = robotController.transform.position;
 
-        float movement = Vector3.Distance(
-            currentPosition,
-            lastPosition
-        );
+        float movement = GetDistanceXZ(currentPosition, lastPosition);
 
         if (movement >= minMovement)
         {
             lastPosition = currentPosition;
-            stuckTimer = 0f;
+            stuckSteps = 0;
         }
         else
         {
-            stuckTimer += Time.fixedDeltaTime;
+            stuckSteps++;
 
-            if (stuckTimer >= stuckTime)
+            if (stuckSteps >= stuckStepsLimit)
             {
-                AddReward(-0.0001f);
+                AddReward(-5f);
                 EndEpisode();
             }
+        }
+    }
+
+    private void CheckTime()
+    {
+        if (episodeSteps >= maxEpisodeSteps)
+        {
+            AddReward(-0.01f);
+            EndEpisode();
         }
     }
 
@@ -266,7 +300,7 @@ public class RobotAgent : Agent
     {
         if (collision.gameObject.layer == LayerMask.NameToLayer("Obstacle"))
         {
-            AddReward(-20f);
+            AddReward(-5f);
             EndEpisode();
         }
     }
@@ -368,10 +402,22 @@ public class RobotAgent : Agent
 
         Destroy(diamond.GetComponent<Collider>());
 
-        Material material = new Material(Shader.Find("Standard"));
+        Shader shader = Shader.Find("Universal Render Pipeline/Lit");
+
+        if (shader == null)
+        {
+            Debug.LogError("No se encontró el shader URP/Lit.");
+            return;
+        }
+
+        Material material = new Material(shader);
         material.color = Color.yellow;
-        material.EnableKeyword("_EMISSION");
-        material.SetColor("_EmissionColor", Color.yellow * 2f);
+
+        if (material.HasProperty("_EmissionColor"))
+        {
+            material.EnableKeyword("_EMISSION");
+            material.SetColor("_EmissionColor", Color.yellow * 2f);
+        }
 
         diamond.GetComponent<Renderer>().material = material;
     }
@@ -393,15 +439,53 @@ public class RobotAgent : Agent
         line.startWidth = width;
         line.endWidth = width;
 
-        Material material = new Material(
-            Shader.Find("Sprites/Default")
-        );
+        Shader shader = Shader.Find("Universal Render Pipeline/Unlit");
 
+        if (shader == null)
+        {
+            Debug.LogError("No se encontró URP/Unlit.");
+            return line;
+        }
+
+        Material material = new Material(shader);
         material.color = color;
+
         line.material = material;
         line.startColor = color;
         line.endColor = color;
 
         return line;
+    }
+
+    private NavigationRoute GetRandomRoute()
+    {
+        if (routeIndex >= routeBag.Count)
+        {
+            routeBag = routes.ToList();
+
+            for (int i = routeBag.Count - 1; i > 0; i--)
+            {
+                int j = Random.Range(0, i + 1);
+
+                (routeBag[i], routeBag[j]) =
+                    (routeBag[j], routeBag[i]);
+            }
+
+            if (routeBag.Count > 1 &&
+    routeBag[0].origin == lastRoute.origin &&
+    routeBag[0].target == lastRoute.target)
+            {
+                int j = Random.Range(1, routeBag.Count);
+
+                (routeBag[0], routeBag[j]) =
+                    (routeBag[j], routeBag[0]);
+            }
+
+            routeIndex = 0;
+        }
+
+        lastRoute = routeBag[routeIndex];
+
+        return routeBag[routeIndex++];
     }
 }

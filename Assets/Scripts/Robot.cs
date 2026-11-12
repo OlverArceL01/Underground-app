@@ -60,11 +60,6 @@ public class Robot : MonoBehaviour
     public Vector3 Velocity => rb.linearVelocity;
     public Vector3 AngularVelocity => rb.angularVelocity;
 
-    [Header("Sensors")]
-    public Transform[] sensors;
-    public Transform[] Sensors => sensors;
-    public float rayDistance = 40f;
-
     void Start()
     {
         // Grab or add a Rigidbody
@@ -97,24 +92,6 @@ public class Robot : MonoBehaviour
                 w.parentRigidbody = rb;
             }
         }
-
-        // Get raycast origin points
-        Transform raycastsParent = transform.Find("raycasts");
-
-        if (raycastsParent != null)
-        {
-            sensors = new Transform[raycastsParent.childCount];
-
-            for (int i = 0; i < raycastsParent.childCount; i++)
-            {
-                sensors[i] = raycastsParent.GetChild(i);
-            }
-        }
-        else
-        {
-            sensors = new Transform[0];
-        }
-
     }
 
     void Update()
@@ -326,29 +303,6 @@ public class Robot : MonoBehaviour
                 );
             }
         }
-
-        if (sensors == null) return;
-
-        foreach (Transform sensor in sensors)
-        {
-            if (sensor == null) continue;
-
-            Vector3 origin = sensor.position;
-            Vector3 direction = sensor.forward;
-
-            if (Physics.Raycast(origin, direction, out RaycastHit hit, rayDistance))
-            {
-                Gizmos.color = Color.red;
-                Gizmos.DrawLine(origin, hit.point);
-                Gizmos.DrawSphere(hit.point, 0.08f);
-            }
-            else
-            {
-                Gizmos.color = Color.green;
-                Gizmos.DrawLine(origin, origin + direction * rayDistance);
-            }
-        }
-
     }
 
     public void SetAgentInput(float steering, float throttle)
